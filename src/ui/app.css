@@ -1,0 +1,57 @@
+.wrap {
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: 2.75rem 1.25rem 1rem;
+  text-align: center;
+}
+
+.wrap h1 {
+  margin: 0 0 1.75rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.count {
+  margin: 0 0 2rem;
+  font-size: clamp(4.5rem, 18vw, 7rem);
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+}
+
+.checkin {
+  width: 100%;
+  border: 0;
+  border-radius: 999px;
+  padding: 1rem 1.25rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+  background: #e8b86d;
+  color: #1c2834;
+  cursor: pointer;
+}
+
+.checkin:hover {
+  filter: brightness(1.06);
+}
+
+.checkin:active {
+  transform: translateY(1px);
+}
+
+.pending,
+.error {
+  min-height: 1.5rem;
+  margin: 0.75rem 0 0;
+  font-size: 0.95rem;
+}
+
+.pending {
+  opacity: 0.75;
+}
+
+.error {
+  color: #f0a8a0;
+}

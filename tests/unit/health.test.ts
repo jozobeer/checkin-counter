@@ -8,6 +8,7 @@ function fakeKv() {
     put: async (k: string, v: string) => {
       store.set(k, v);
     },
+    list: async () => ({ keys: [] as { name: string }[], list_complete: true }),
   };
 }
 

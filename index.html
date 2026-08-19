@@ -4,12 +4,22 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>来場者チェックインカウンター</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23324a5e'/%3E%3C/svg%3E" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231c2834'/%3E%3Cpath d='M4 8.2 7 11l5-6' fill='none' stroke='%23e8b86d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #1c2834;
+        color: #f4efe6;
+        font-family: "Hiragino Sans", "Yu Gothic", "Noto Sans JP", sans-serif;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
-    <footer style="margin-top:3rem;text-align:center;font-size:.8rem;opacity:.6">
-      <a href="https://apps.jozo.beer" style="color:inherit">apps.jozo.beer</a>
+    <footer style="margin-top:3rem;text-align:center;font-size:.8rem;opacity:.85">
+      <a href="https://apps.jozo.beer" style="color:#d4c4a8">apps.jozo.beer</a>
     </footer>
     <script type="module" src="/src/ui/main.tsx"></script>
   </body>

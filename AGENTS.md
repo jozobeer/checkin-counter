@@ -1,23 +1,48 @@
 # 来場者チェックインカウンター
 
-このリポジトリは kojo が生成した Web アプリです（React UI + Hono API）。
+このリポジトリは kojo が生成した Web アプリです（React UI + Hono API）。公開後の保守はこのリポジトリ単体で行う。
 
-## アイデア
+## アプリ概要と構成
 
-# 来場者チェックインカウンター
+イベント会場のスタッフが各自の端末で「チェックイン」を押すと共有人数が 1 増え、どの端末でも同じ数字が見える匿名カウンター。ログイン・氏名入力はない。人数は KV のキー数で算出し、単一キーの read-modify-write はしない（同時チェックインで増分が消えないため）。
 
-イベント会場のスタッフが各自の端末でチェックインボタンを押すと、その場にいる来場者数としてサーバー上の共有カウンターが1増え、誰の端末で見ても同じ現在人数が表示される匿名の共有カウンターアプリ。
+画面（`src/ui/App.tsx`、縦 1 カラム）:
 
-## 意図
+- 見出し「来場者チェックインカウンター」
+- 現在人数（`data-testid="count"`）。未取得時は「—」
+- 全幅のチェックインボタン（`data-testid="checkin"`）。送信中も無効化せず、各クリックは独立した `POST` を並列に飛ばす。送信中は「送信中…」のみ表示
+- エラー（`data-testid="error"`）。429 は「混み合っています。少し待ってから押してください」、その他は「チェックインできませんでした。もう一度お試しください」。失敗時は count を変えない
+- 起動時に `GET /api/count`、以後 3 秒ポーリング。表示値は受信済み count の最大値（KV の結果整合性で古い値が返っても巻き戻さない）
+- API 不達時も骨格（タイトル・ボタン・フッター）は描画する
 
-複数のスタッフが別々の入口や端末からチェックインを担当するイベントで、個人アカウントなしに「今何人入場したか」をスタッフ全員がリアルタイムで同じ数字として把握したい場面で使う。
+API（すべて JSON。HTML は返さない）:
 
-## 受け入れ条件の種
+- `GET /api/health` — KV 書込→読出の往復。200 `{"ok":true}`。契約を壊さない
+- `GET /api/count` — 200 `{"count":number}`
+- `POST /api/checkin` — 201 `{"count":number}`（加算後）。429 / 400 / 413 では人数は増えない
 
-- チェックインボタンを押すと共有カウンターが1増え、別ブラウザ（別セッション）で開いても増えた後の数字が見える
-- 複数の端末からほぼ同時にチェックインしても、カウンターの増分が失われず正しい合計になる
-- チェックイン操作に個人を識別する情報（氏名・アカウント）は不要で、誰でも匿名で押せる
+KV（`c.env.KV` のみ。TTL なしのキーを消すと人数が減る）:
 
+- `c:<crypto.randomUUID()>` — チェックイン 1 件。値は打刻 ISO 文字列
+- `rl:<ip>` — レートリミット `{"start":<epoch ms>,"n":<count>}`、`expirationTtl: 60`
+- 人数は `list({ prefix: "c:" })` を cursor で全ページ走査してキー数を合算
+- IP は `CF-Connecting-IP`、無ければ `"unknown"`
+
+書き込み制限:
+
+- ボディ空または `{}` のみ許可。257 バイト超は 413、未知フィールド・不正 JSON は 400
+- 同一 IP は初回から 5 秒間に 20 回まで成功、21 回目は 429。4999ms は同一窓、5000ms でリセット
+- `rl:<ip>` は単一キーの read-modify-write のため、並行 POST では上限判定がやや甘くなる（簡易レートリミットとして許容）
+
+既知の制限: 本番 KV の `list` は結果整合性のため、他端末への反映が遅れることがある。増分そのものは失われない。
+
+ファイル:
+
+- `index.html` + `src/ui/` — UI 正本。状態は `App.tsx` の `useState` のみ
+- `src/worker/index.ts` — Hono。永続化は `c.env.KV` のみ
+- `tests/unit/` — vitest（フェイク KV を `app.request` の第 3 引数で注入）
+- `tests/app.spec.ts` — Playwright。`webServer` は `.wrangler/test-state` を消してから `wrangler dev` する（チェックインキーに TTL がなく、残留すると絶対値アサーションが壊れる）
+- `public/` — `npm run build` の単一 HTML。直接編集しない
 
 ## 技術スタック（不変）
 
@@ -26,26 +51,40 @@
 - 配信: Cloudflare Workers（main=`src/worker/index.ts`、assets=`public/`、/api/* が Worker に落ちる）
 - 保守時もこのスタックを維持すること。フレームワーク・ビルドツール・宣言外ライブラリの導入は禁止
 
-## 制約
+## 品質不変条件
 
-- サーバは src/worker/index.ts の Hono アプリ。/api/* の JSON のみを提供し、HTML を返さない
-- サーバ側の永続化は KV binding（c.env.KV）のみ。D1/DO・外部 API は使わない
-- GET /api/health は KV 書込→読出を実往復して 200 と {"ok":true} を返し続けること（機械検証が依存。壊さない）
-- 匿名書込エンドポイントには入力サイズ上限・バリデーション・簡易レートリミットを必ず実装する
-- UI は API に到達できなくても骨格（タイトル・フッター）を描画すること（視覚検証は file:// で行われる）
-- 受け入れ条件のテスト: API/ロジックは tests/unit/*.test.ts（vitest、KV はフェイクを app.request の第3引数で注入）、ブラウザ挙動は tests/app.spec.ts（Playwright）に書く
-- PLAN.md の受け入れ条件それぞれに対応するテストを書き、`npm test` が通ること。API/ロジックは `tests/unit/*.test.ts`（vitest）、ブラウザ挙動は `tests/app.spec.ts`（Playwright）。雛形のスモークテストと health テストは削除しない
-- UI の正本は `index.html` と `src/ui/`。`public/` は `npm run build` の出力なので直接編集しない
-- favicon は `index.html` の `<head>` に `<link rel="icon" href="data:image/svg+xml,...">` のインライン data URI で含める（外部ファイル・外部URL不可。アプリのテーマに合った絵柄にする）
-- hub（apps.jozo.beer）へのフッター導線は `index.html` の React ルート（`#root`）の外に置く（JS が読めない環境でも描画されるため）。マークアップは次のとおり固定する:
+次を壊さないこと。変更後は `npm run verify` が通る状態を維持する。
 
-  ```html
-  <footer style="margin-top:3rem;text-align:center;font-size:.8rem;opacity:.6">
-    <a href="https://apps.jozo.beer" style="color:inherit">apps.jozo.beer</a>
-  </footer>
-  ```
+- favicon は `index.html` の `<head>` に `<link rel="icon" href="data:image/svg+xml,...">` のインライン data URI（外部ファイル・外部 URL 不可）
+- hub（apps.jozo.beer）へのフッターは `#root` の外に置く。リンク先 `https://apps.jozo.beer` とリンクテキスト `apps.jozo.beer` は変えない
 
-  スタイル（リンク色を含む）はアプリのテーマに合わせて調整してよいが、リンク先 `https://apps.jozo.beer` とリンクテキスト `apps.jozo.beer` は変えない。リンク色を変える場合は背景とのコントラストを確保すること
-- README.md はテンプレートが生成済み。削除しないこと
-- apple-touch-icon / manifest / og-image / robots / sitemap は factory が公開時に自動生成するため、builder は書かない
-- 完成条件: PLAN.md の受け入れ条件をすべて満たし、`npm run verify` と `npm test` が通ること
+```html
+<footer style="margin-top:3rem;text-align:center;font-size:.8rem;opacity:.6">
+  <a href="https://apps.jozo.beer" style="color:inherit">apps.jozo.beer</a>
+</footer>
+```
+
+スタイル（リンク色を含む）はテーマに合わせて調整してよい。リンク色を変える場合は背景とのコントラストを確保する。
+
+その他:
+
+- `public/` は `npm run build` の出力なので直接編集しない
+- README.md は削除しない
+- apple-touch-icon / manifest / og-image / robots / sitemap は公開基盤が生成するため書かない
+- 雛形のスモークテストと health テストは削除しない
+- サーバ側の永続化は KV binding（`c.env.KV`）のみ。D1/DO・外部 API は使わない
+- `GET /api/health` は KV 書込→読出の実往復で 200 と `{"ok":true}` を返し続ける（機械検証が依存）
+- 匿名書込エンドポイントには入力サイズ上限・バリデーション・簡易レートリミットを維持する
+- UI は API に到達できなくても骨格（タイトル・フッター）を描画する（視覚検証は `file://` で行われる）
+
+## 保守の進め方
+
+1. 変更前に受け入れ条件をテストにする（API/ロジックは `tests/unit/*.test.ts`、ブラウザ挙動は `tests/app.spec.ts`）
+2. 実装する
+3. `npm test` が通ることを確認する
+4. `git commit` と `git push`
+5. `npm run deploy`
+
+## PLAN.md について
+
+`PLAN.md` は初回実装時の計画であり歴史的文書である。現状の正は README.md とテスト（`tests/`）である。受け入れ条件の追加・変更はテストと README に反映する。PLAN とテストが食い違う場合はテストに従う。

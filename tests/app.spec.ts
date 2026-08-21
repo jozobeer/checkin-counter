@@ -23,15 +23,46 @@ async function visibleCount(page: Page): Promise<number> {
   return Number(await loc.innerText());
 }
 
-test("AC1: チェックインすると別セッションの画面にも同じ増加後の数値が表示される", async ({ browser }) => {
+async function createRoom(page: Page, name: string) {
+  await page.goto("/");
+  await page.getByTestId("room-name-input").fill(name);
+  await page.getByTestId("create").click();
+  await expect(page).toHaveURL(/#\/r\/[0-9a-f]{8}$/);
+}
+
+test("AC1: ルートには会場名フォームだけがあり人数とチェックインボタンは無い", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("room-name-input")).toBeVisible();
+  await expect(page.getByTestId("create")).toBeVisible();
+  await expect(page.getByTestId("count")).toHaveCount(0);
+  await expect(page.getByTestId("checkin")).toHaveCount(0);
+});
+
+test("AC2: 会場を作ると共有URLに遷移し画面上でコピーできる", async ({ browser }) => {
+  const context = await browser.newContext({ permissions: ["clipboard-write"] });
+  const page = await context.newPage();
+  await createRoom(page, "夏祭り");
+  const id = page.url().match(/#\/r\/([0-9a-f]{8})$/)![1];
+  await expect(page.getByTestId("room-name")).toHaveText("夏祭り");
+  const origin = new URL(page.url()).origin;
+  await expect(page.getByTestId("share-url")).toHaveText(`${origin}/#/r/${id}`);
+  await page.getByTestId("copy").click();
+  await expect(page.getByTestId("copied")).toHaveText("コピーしました");
+  await context.close();
+});
+
+test("AC3: 共有URLを別セッションで開くと同じ会場名と同じ人数が見える", async ({ browser }) => {
   const contextA = await browser.newContext();
   const contextB = await browser.newContext();
   const pageA = await contextA.newPage();
   const pageB = await contextB.newPage();
-  await pageA.goto("/");
-  await pageB.goto("/");
 
+  await createRoom(pageA, "本祭");
+  await expect(pageA.getByTestId("room-name")).toHaveText("本祭");
   const startA = await visibleCount(pageA);
+
+  await pageB.goto(pageA.url());
+  await expect(pageB.getByTestId("room-name")).toHaveText("本祭");
   await expect(pageB.getByTestId("count")).toHaveText(String(startA));
 
   await pageA.getByTestId("checkin").click();
@@ -42,20 +73,56 @@ test("AC1: チェックインすると別セッションの画面にも同じ増
   await contextB.close();
 });
 
-test("AC2: 3セッション同時チェックインと、応答待ち中の追加クリックがすべて加算される", async ({ browser, page }) => {
-  const contexts = await Promise.all([0, 1, 2].map(() => browser.newContext()));
-  const pages = await Promise.all(contexts.map((ctx) => ctx.newPage()));
-  await Promise.all(pages.map((p) => p.goto("/")));
-  const concurrentStart = await visibleCount(pages[0]);
+test("AC4: 別々に作った2つのカウンターは互いに影響しない", async ({ page, context }) => {
+  await createRoom(page, "会場X");
+  await page.getByTestId("checkin").click();
+  await expect(page.getByTestId("count")).toHaveText("1");
 
-  await Promise.all(pages.map((p) => p.getByTestId("checkin").click()));
-  await expect(pages[0].getByTestId("count")).toHaveText(String(concurrentStart + 3), { timeout: 10_000 });
-  await Promise.all(contexts.map((ctx) => ctx.close()));
+  const pageY = await context.newPage();
+  await createRoom(pageY, "会場Y");
+  await expect(pageY.getByTestId("count")).toHaveText("0");
+  await new Promise((resolve) => setTimeout(resolve, 6500));
+  await expect(pageY.getByTestId("count")).toHaveText("0");
+  await expect(page.getByTestId("count")).toHaveText("1");
+});
 
-  await page.goto("/");
+test("AC5: 存在しないIDの共有URLは見つからない旨を表示し人数を出さない", async ({ page }) => {
+  await page.goto("/#/r/00000000");
+  await expect(page.getByTestId("notfound")).toHaveText("このカウンターは見つかりませんでした");
+  await expect(page.getByTestId("count")).toHaveCount(0);
+  await expect(page.getByTestId("checkin")).toHaveCount(0);
+});
+
+test("同一IPは5秒間に20回まで成功し、21回目は拒否されて人数は増えない", async ({ page }) => {
+  test.setTimeout(60_000);
+  await new Promise((resolve) => setTimeout(resolve, 5100));
+
+  await createRoom(page, "レート会場");
+  const start = await visibleCount(page);
+
+  for (let i = 0; i < 20; i++) {
+    const wait = page.waitForResponse((res) => res.url().includes("/checkin") && res.request().method() === "POST");
+    await page.getByTestId("checkin").click();
+    await wait;
+  }
+  await expect(page.getByTestId("count")).toHaveText(String(start + 20));
+
+  const wait21 = page.waitForResponse((res) => res.url().includes("/checkin") && res.request().method() === "POST");
+  await page.getByTestId("checkin").click();
+  await wait21;
+  await expect(page.getByTestId("error")).toHaveText("混み合っています。少し待ってから押してください");
+  await expect(page.getByTestId("count")).toHaveText(String(start + 20));
+
+  await new Promise((resolve) => setTimeout(resolve, 5100));
+  await page.getByTestId("checkin").click();
+  await expect(page.getByTestId("count")).toHaveText(String(start + 21));
+});
+
+test("応答待ち中の連打が全部加算される", async ({ page }) => {
+  await createRoom(page, "連打会場");
   const delayedStart = await visibleCount(page);
   let delayed = false;
-  await page.route("**/api/checkin", async (route) => {
+  await page.route("**/api/rooms/**/checkin", async (route) => {
     if (route.request().method() === "POST" && !delayed) {
       delayed = true;
       await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -69,20 +136,17 @@ test("AC2: 3セッション同時チェックインと、応答待ち中の追�
   await expect(page.getByTestId("count")).toHaveText(String(delayedStart + 3), { timeout: 10_000 });
 });
 
-test("AC3: 新規セッションから氏名・ログインなしでチェックインできる", async ({ browser }) => {
+test("氏名・ログインなしでチェックインできる", async ({ browser }) => {
   const context = await browser.newContext();
   const page = await context.newPage();
   const checkinHeaders: Record<string, string>[] = [];
   page.on("request", (req) => {
-    if (req.method() === "POST" && req.url().includes("/api/checkin")) {
+    if (req.method() === "POST" && req.url().includes("/checkin")) {
       checkinHeaders.push(req.headers());
     }
   });
 
-  await page.goto("/");
-  await expect(page.locator("input")).toHaveCount(0);
-  await expect(page.locator("form")).toHaveCount(0);
-
+  await createRoom(page, "匿名会場");
   const start = await visibleCount(page);
   await page.getByTestId("checkin").click();
   await expect(page.getByTestId("count")).toHaveText(String(start + 1));
@@ -96,32 +160,7 @@ test("AC3: 新規セッションから氏名・ログインなしでチェック
   await context.close();
 });
 
-test("AC4: 同一IPは5秒間に20回まで成功し、21回目は拒否されて人数は増えない", async ({ page }) => {
-  test.setTimeout(60_000);
-  await new Promise((resolve) => setTimeout(resolve, 5100));
-
-  await page.goto("/");
-  const start = await visibleCount(page);
-
-  for (let i = 0; i < 20; i++) {
-    const wait = page.waitForResponse((res) => res.url().includes("/api/checkin") && res.request().method() === "POST");
-    await page.getByTestId("checkin").click();
-    await wait;
-  }
-  await expect(page.getByTestId("count")).toHaveText(String(start + 20));
-
-  const wait21 = page.waitForResponse((res) => res.url().includes("/api/checkin") && res.request().method() === "POST");
-  await page.getByTestId("checkin").click();
-  await wait21;
-  await expect(page.getByTestId("error")).toHaveText("混み合っています。少し待ってから押してください");
-  await expect(page.getByTestId("count")).toHaveText(String(start + 20));
-
-  await new Promise((resolve) => setTimeout(resolve, 5100));
-  await page.getByTestId("checkin").click();
-  await expect(page.getByTestId("count")).toHaveText(String(start + 21));
-});
-
-test("AC5: file:// でもタイトルとフッターが表示され pageerror がない", async ({ browser }) => {
+test("file:// でもタイトルとフッターが表示され pageerror がない", async ({ browser }) => {
   const html = pathToFileURL(path.resolve("public/index.html")).href;
   const page = await browser.newPage();
   const errors: string[] = [];

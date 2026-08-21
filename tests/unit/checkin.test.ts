@@ -1,129 +1,132 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import app, { countCheckins } from "../../src/worker/index";
+import { env, fakeKv } from "./fake-kv";
 
-function fakeKv() {
-  const store = new Map<string, string>();
-  return {
-    get: async (k: string) => store.get(k) ?? null,
-    put: async (k: string, v: string) => {
-      store.set(k, v);
+async function createRoom(bindings: ReturnType<typeof env>, name = "会場") {
+  const res = await app.request(
+    "/api/rooms",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
     },
-    list: async (opts?: { prefix?: string; cursor?: string; limit?: number }) => {
-      const prefix = opts?.prefix ?? "";
-      const limit = opts?.limit ?? 1000;
-      const names = [...store.keys()].filter((name) => name.startsWith(prefix)).sort();
-      const start = opts?.cursor ? Number(opts.cursor) : 0;
-      const page = names.slice(start, start + limit);
-      const next = start + page.length;
-      const list_complete = next >= names.length;
-      return {
-        keys: page.map((name) => ({ name })),
-        list_complete,
-        cursor: list_complete ? undefined : String(next),
-      };
-    },
-  };
+    bindings,
+  );
+  const body = (await res.json()) as { id: string };
+  return body.id;
 }
 
-function env() {
-  return { KV: fakeKv() };
+async function checkin(bindings: ReturnType<typeof env>, id: string, init?: RequestInit) {
+  return app.request(`/api/rooms/${id}/checkin`, { method: "POST", ...init }, bindings);
 }
 
-describe("GET /api/count", () => {
-  it("チェックインが無いとき count 0 を返す", async () => {
-    const res = await app.request("/api/count", {}, env());
+describe("GET /api/rooms/:id", () => {
+  it("会場作成直後の count は 0", async () => {
+    const bindings = env();
+    const id = await createRoom(bindings);
+    const res = await app.request(`/api/rooms/${id}`, {}, bindings);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ count: 0 });
+    expect(await res.json()).toMatchObject({ count: 0 });
   });
 });
 
-describe("POST /api/checkin", () => {
+describe("POST /api/rooms/:id/checkin", () => {
   it("空ボディで 201 と加算後の count を返す", async () => {
     const bindings = env();
-    const res = await app.request("/api/checkin", { method: "POST" }, bindings);
+    const id = await createRoom(bindings);
+    const res = await checkin(bindings, id);
     expect(res.status).toBe(201);
     expect(await res.json()).toEqual({ count: 1 });
   });
 
   it("{} でも 201 を返す", async () => {
-    const res = await app.request(
-      "/api/checkin",
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
-      env(),
-    );
+    const bindings = env();
+    const id = await createRoom(bindings);
+    const res = await checkin(bindings, id, {
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
     expect(res.status).toBe(201);
     expect(await res.json()).toEqual({ count: 1 });
   });
 
-  it("10 並列でも増分が失われず count が 10 になる", async () => {
+  it("同一会場への 10 並列でも増分が失われず count が 10 になる", async () => {
     const bindings = env();
-    const posts = Array.from({ length: 10 }, () =>
-      app.request("/api/checkin", { method: "POST" }, bindings),
-    );
+    const id = await createRoom(bindings);
+    const posts = Array.from({ length: 10 }, () => checkin(bindings, id));
     const results = await Promise.all(posts);
     expect(results.map((r) => r.status)).toEqual(Array(10).fill(201));
 
-    const counted = await app.request("/api/count", {}, bindings);
+    const counted = await app.request(`/api/rooms/${id}`, {}, bindings);
     expect(counted.status).toBe(200);
-    expect(await counted.json()).toEqual({ count: 10 });
+    expect(await counted.json()).toMatchObject({ count: 10 });
+  });
+
+  it("会場 A に 3 回、会場 B に 1 回チェックインするとそれぞれ独立して数える", async () => {
+    const bindings = env();
+    const idA = await createRoom(bindings, "会場A");
+    const idB = await createRoom(bindings, "会場B");
+    for (let i = 0; i < 3; i++) {
+      expect((await checkin(bindings, idA)).status).toBe(201);
+    }
+    expect((await checkin(bindings, idB)).status).toBe(201);
+
+    expect(await (await app.request(`/api/rooms/${idA}`, {}, bindings)).json()).toMatchObject({ count: 3 });
+    expect(await (await app.request(`/api/rooms/${idB}`, {}, bindings)).json()).toMatchObject({ count: 1 });
   });
 });
 
 describe("countCheckins のページング", () => {
-  it("1000 件超を cursor で全件数え、c: 以外は除外する", async () => {
+  it("1001 件を cursor で全件数え、他会場・r:・rl:・health を除外する", async () => {
     const kv = fakeKv();
+    const roomId = "aabbccdd";
     for (let i = 0; i < 1001; i++) {
-      await kv.put(`c:${String(i).padStart(4, "0")}`, "t");
+      await kv.put(`c:${roomId}:${String(i).padStart(4, "0")}`, "t");
     }
-    await kv.put("health", "x");
+    await kv.put("c:ffffffff:0", "t");
+    await kv.put("r:aabbccdd", '{"name":"x","createdAt":"t"}');
     await kv.put("rl:1.1.1.1", '{"start":0,"n":1}');
-    expect(await countCheckins(kv)).toBe(1001);
+    await kv.put("health", "x");
+    expect(await countCheckins(kv, roomId)).toBe(1001);
   });
 });
 
-describe("POST /api/checkin の保護", () => {
+describe("POST /api/rooms/:id/checkin の保護", () => {
   it("257 バイトのボディは 413 で人数は増えない", async () => {
     const bindings = env();
-    const res = await app.request(
-      "/api/checkin",
-      { method: "POST", body: "x".repeat(257) },
-      bindings,
-    );
+    const id = await createRoom(bindings);
+    const res = await checkin(bindings, id, { body: "x".repeat(257) });
     expect(res.status).toBe(413);
-    const counted = await app.request("/api/count", {}, bindings);
-    expect(await counted.json()).toEqual({ count: 0 });
+    const counted = await app.request(`/api/rooms/${id}`, {}, bindings);
+    expect(await counted.json()).toMatchObject({ count: 0 });
   });
 
   it("未知フィールドの JSON は 400 で人数は増えない", async () => {
     const bindings = env();
-    const res = await app.request(
-      "/api/checkin",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "x" }),
-      },
-      bindings,
-    );
+    const id = await createRoom(bindings);
+    const res = await checkin(bindings, id, {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "x" }),
+    });
     expect(res.status).toBe(400);
-    const counted = await app.request("/api/count", {}, bindings);
-    expect(await counted.json()).toEqual({ count: 0 });
+    const counted = await app.request(`/api/rooms/${id}`, {}, bindings);
+    expect(await counted.json()).toMatchObject({ count: 0 });
   });
 
   it("不正な JSON は 400 で人数は増えない", async () => {
     const bindings = env();
-    const res = await app.request(
-      "/api/checkin",
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{not json" },
-      bindings,
-    );
+    const id = await createRoom(bindings);
+    const res = await checkin(bindings, id, {
+      headers: { "Content-Type": "application/json" },
+      body: "{not json",
+    });
     expect(res.status).toBe(400);
-    const counted = await app.request("/api/count", {}, bindings);
-    expect(await counted.json()).toEqual({ count: 0 });
+    const counted = await app.request(`/api/rooms/${id}`, {}, bindings);
+    expect(await counted.json()).toMatchObject({ count: 0 });
   });
 });
 
-describe("POST /api/checkin のレートリミット", () => {
+describe("POST /api/rooms/:id/checkin のレートリミット", () => {
   const start = 1_700_000_000_000;
 
   beforeEach(() => {
@@ -134,35 +137,33 @@ describe("POST /api/checkin のレートリミット", () => {
     vi.useRealTimers();
   });
 
-  async function post(bindings: ReturnType<typeof env>) {
-    return app.request("/api/checkin", { method: "POST" }, bindings);
-  }
-
   it("同一 IP は 5 秒窓で 20 回まで成功し 21 回目は 429", async () => {
     const bindings = env();
+    const id = await createRoom(bindings);
     for (let i = 0; i < 20; i++) {
-      const res = await post(bindings);
+      const res = await checkin(bindings, id);
       expect(res.status).toBe(201);
     }
-    const denied = await post(bindings);
+    const denied = await checkin(bindings, id);
     expect(denied.status).toBe(429);
-    const counted = await app.request("/api/count", {}, bindings);
-    expect(await counted.json()).toEqual({ count: 20 });
+    const counted = await app.request(`/api/rooms/${id}`, {}, bindings);
+    expect(await counted.json()).toMatchObject({ count: 20 });
   });
 
   it("4999ms 経過時点の 21 回目は 429、5000ms で窓が明けて 201", async () => {
     const bindings = env();
+    const id = await createRoom(bindings);
     for (let i = 0; i < 20; i++) {
-      expect((await post(bindings)).status).toBe(201);
+      expect((await checkin(bindings, id)).status).toBe(201);
     }
 
     vi.setSystemTime(start + 4999);
-    const stillDenied = await post(bindings);
+    const stillDenied = await checkin(bindings, id);
     expect(stillDenied.status).toBe(429);
-    expect(await (await app.request("/api/count", {}, bindings)).json()).toEqual({ count: 20 });
+    expect(await (await app.request(`/api/rooms/${id}`, {}, bindings)).json()).toMatchObject({ count: 20 });
 
     vi.setSystemTime(start + 5000);
-    const allowed = await post(bindings);
+    const allowed = await checkin(bindings, id);
     expect(allowed.status).toBe(201);
     expect(await allowed.json()).toEqual({ count: 21 });
   });

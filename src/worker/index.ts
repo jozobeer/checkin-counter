@@ -13,10 +13,15 @@ export interface KvLike {
 
 type RateWindow = { start: number; n: number };
 
-const CHECKIN_PREFIX = "c:";
-const RATE_WINDOW_MS = 5000;
+const ROOM_ID_RE = /^[0-9a-f]{8}$/;
+const ROOM_NAME_MAX = 40;
 const RATE_LIMIT = 20;
+const CHECKIN_WINDOW_MS = 5000;
+const ROOM_WINDOW_MS = 60_000;
+const CHECKIN_RATE_TTL = 60;
+const ROOM_RATE_TTL = 120;
 const MAX_BODY_BYTES = 256;
+const ID_REGENERATIONS = 3;
 
 const app = new Hono<{ Bindings: { KV: KvLike } }>();
 
@@ -28,29 +33,54 @@ app.get("/api/health", async (c) => {
   return read === stamp ? c.json({ ok: true }) : c.json({ ok: false }, 500);
 });
 
-app.get("/api/count", async (c) => {
-  const count = await countCheckins(c.env.KV);
-  return c.json({ count });
-});
-
-app.post("/api/checkin", async (c) => {
-  const invalid = await validateBody(c.req.raw);
-  if (invalid) return c.json({ error: true }, invalid);
+app.post("/api/rooms", async (c) => {
+  const parsed = await parseRoomBody(c.req.raw);
+  if (parsed === 400 || parsed === 413) return c.json({ error: true }, parsed);
 
   const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
-  const allowed = await checkRateLimit(c.env.KV, ip, Date.now());
+  const allowed = await checkRateLimit(c.env.KV, `rlr:${ip}`, Date.now(), ROOM_WINDOW_MS, RATE_LIMIT, ROOM_RATE_TTL);
   if (!allowed) return c.json({ error: true }, 429);
 
-  await c.env.KV.put(`${CHECKIN_PREFIX}${crypto.randomUUID()}`, new Date().toISOString());
-  const count = await countCheckins(c.env.KV);
+  const id = await allocateRoomId(c.env.KV);
+  if (!id) return c.json({ error: true }, 500);
+
+  await c.env.KV.put(`r:${id}`, JSON.stringify({ name: parsed.name, createdAt: new Date().toISOString() }));
+  return c.json({ id, name: parsed.name }, 201);
+});
+
+app.get("/api/rooms/:id", async (c) => {
+  const id = c.req.param("id");
+  if (!ROOM_ID_RE.test(id)) return c.json({ error: true }, 404);
+
+  const room = await readRoom(c.env.KV, id);
+  if (!room) return c.json({ error: true }, 404);
+
+  const count = await countCheckins(c.env.KV, id);
+  return c.json({ id, name: room.name, count });
+});
+
+app.post("/api/rooms/:id/checkin", async (c) => {
+  const invalid = await validateCheckinBody(c.req.raw);
+  if (invalid) return c.json({ error: true }, invalid);
+
+  const id = c.req.param("id");
+  if (!ROOM_ID_RE.test(id)) return c.json({ error: true }, 404);
+  if (!(await readRoom(c.env.KV, id))) return c.json({ error: true }, 404);
+
+  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+  const allowed = await checkRateLimit(c.env.KV, `rl:${ip}`, Date.now(), CHECKIN_WINDOW_MS, RATE_LIMIT, CHECKIN_RATE_TTL);
+  if (!allowed) return c.json({ error: true }, 429);
+
+  await c.env.KV.put(`c:${id}:${crypto.randomUUID()}`, new Date().toISOString());
+  const count = await countCheckins(c.env.KV, id);
   return c.json({ count }, 201);
 });
 
-export async function countCheckins(kv: KvLike): Promise<number> {
+export async function countCheckins(kv: KvLike, roomId: string): Promise<number> {
   let total = 0;
   let cursor: string | undefined;
   for (;;) {
-    const page = await kv.list({ prefix: CHECKIN_PREFIX, cursor });
+    const page = await kv.list({ prefix: `c:${roomId}:`, cursor });
     total += page.keys.length;
     if (page.list_complete) return total;
     cursor = page.cursor;
@@ -58,20 +88,47 @@ export async function countCheckins(kv: KvLike): Promise<number> {
   }
 }
 
-async function checkRateLimit(kv: KvLike, ip: string, now: number): Promise<boolean> {
-  const key = `rl:${ip}`;
-  const current = await readWindow(kv, key, now);
-  if (current.n + 1 > RATE_LIMIT) return false;
+async function allocateRoomId(kv: KvLike): Promise<string | null> {
+  for (let n = 0; n <= ID_REGENERATIONS; n++) {
+    const id = crypto.randomUUID().slice(0, 8);
+    if (!(await kv.get(`r:${id}`))) return id;
+  }
+  return null;
+}
+
+async function readRoom(kv: KvLike, id: string): Promise<{ name: string } | null> {
+  const raw = await kv.get(`r:${id}`);
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const name = (parsed as { name?: unknown }).name;
+    return typeof name === "string" ? { name } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function checkRateLimit(
+  kv: KvLike,
+  key: string,
+  now: number,
+  windowMs: number,
+  limit: number,
+  expirationTtl: number,
+): Promise<boolean> {
+  const current = await readWindow(kv, key, now, windowMs);
+  if (current.n + 1 > limit) return false;
   const next = { start: current.start, n: current.n + 1 };
-  await kv.put(key, JSON.stringify(next), { expirationTtl: 60 });
+  await kv.put(key, JSON.stringify(next), { expirationTtl });
   return true;
 }
 
-async function readWindow(kv: KvLike, key: string, now: number): Promise<RateWindow> {
+async function readWindow(kv: KvLike, key: string, now: number, windowMs: number): Promise<RateWindow> {
   const raw = await kv.get(key);
   if (!raw) return { start: now, n: 0 };
   const parsed = parseWindow(raw);
-  if (!parsed || now - parsed.start >= RATE_WINDOW_MS) return { start: now, n: 0 };
+  if (!parsed || now - parsed.start >= windowMs) return { start: now, n: 0 };
   return parsed;
 }
 
@@ -88,17 +145,45 @@ function parseWindow(raw: string): RateWindow | null {
   }
 }
 
-async function validateBody(req: Request): Promise<400 | 413 | null> {
-  const declared = req.headers.get("content-length");
-  if (declared !== null && Number(declared) > MAX_BODY_BYTES) return 413;
-
-  const text = await req.text();
-  if (text.length > MAX_BODY_BYTES) return 413;
-  if (text.trim() === "") return null;
-  return parseAllowedJson(text);
+async function parseRoomBody(req: Request): Promise<{ name: string } | 400 | 413> {
+  const text = await readBodyText(req);
+  if (text === 413) return 413;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return 400;
+  }
+  return parseRoomName(parsed);
 }
 
-function parseAllowedJson(text: string): 400 | null {
+function parseRoomName(parsed: unknown): { name: string } | 400 {
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return 400;
+  const keys = Object.keys(parsed);
+  if (keys.length !== 1 || keys[0] !== "name") return 400;
+  const name = (parsed as { name: unknown }).name;
+  if (typeof name !== "string") return 400;
+  const trimmed = name.trim();
+  const len = [...trimmed].length;
+  if (len < 1 || len > ROOM_NAME_MAX) return 400;
+  return { name: trimmed };
+}
+
+async function validateCheckinBody(req: Request): Promise<400 | 413 | null> {
+  const text = await readBodyText(req);
+  if (text === 413) return 413;
+  if (text.trim() === "") return null;
+  return parseEmptyJson(text);
+}
+
+async function readBodyText(req: Request): Promise<string | 413> {
+  const declared = req.headers.get("content-length");
+  if (declared !== null && Number(declared) > MAX_BODY_BYTES) return 413;
+  const text = await req.text();
+  return text.length > MAX_BODY_BYTES ? 413 : text;
+}
+
+function parseEmptyJson(text: string): 400 | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);

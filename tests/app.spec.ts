@@ -133,3 +133,50 @@ test("AC5: file:// でもタイトルとフッターが表示され pageerror �
   expect(errors).toEqual([]);
   await page.close();
 });
+
+function jsonLdNodes(data: unknown): Record<string, unknown>[] {
+  if (Array.isArray(data)) {
+    return data.filter((node): node is Record<string, unknown> => !!node && typeof node === "object");
+  }
+  if (!data || typeof data !== "object") return [];
+  const obj = data as Record<string, unknown>;
+  if (Array.isArray(obj["@graph"])) {
+    return obj["@graph"].filter((node): node is Record<string, unknown> => !!node && typeof node === "object");
+  }
+  return [obj];
+}
+
+function isWebApplication(node: Record<string, unknown>): boolean {
+  const type = node["@type"];
+  return type === "WebApplication" || (Array.isArray(type) && type.includes("WebApplication"));
+}
+
+test("SEO: meta description があり content が空でない", async ({ page }) => {
+  await page.goto("/");
+  const content = await page.locator('meta[name="description"]').getAttribute("content");
+  expect(content?.trim()).toBeTruthy();
+});
+
+test("SEO: JSON-LD に WebApplication の必須フィールドがある", async ({ page }) => {
+  await page.goto("/");
+  const raw = await page.locator('script[type="application/ld+json"]').textContent();
+  expect(raw?.trim()).toBeTruthy();
+  const app = jsonLdNodes(JSON.parse(raw!)).find(isWebApplication);
+  expect(app).toBeTruthy();
+  expect(typeof app!.name).toBe("string");
+  expect(String(app!.name).trim()).not.toBe("");
+  expect(typeof app!.description).toBe("string");
+  expect(String(app!.description).trim()).not.toBe("");
+  expect(typeof app!.url).toBe("string");
+  expect(String(app!.url).trim()).not.toBe("");
+  expect(typeof app!.applicationCategory).toBe("string");
+  expect(String(app!.applicationCategory).trim()).not.toBe("");
+  const offers = app!.offers as { price?: unknown } | undefined;
+  expect(offers?.price).toBe("0");
+});
+
+test("SEO: 使い方と FAQ の見出しが DOM にある", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "使い方" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "FAQ" })).toBeVisible();
+});

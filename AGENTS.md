@@ -8,7 +8,7 @@
 
 | 領域 | 実装 |
 |------|------|
-| UI | `src/ui/App.tsx`、縦 1 カラム。見出し「来場者チェックインカウンター」、人数（`data-testid="count"`、未取得は「—」）、全幅ボタン（`data-testid="checkin"`）、エラー（`data-testid="error"`）。状態は `count` / `error` / `inFlight` の `useState` のみ。起動時 `GET /api/count`、以後 3 秒ポーリング。表示は受信済み count の最大値（KV の結果整合性で古い値が返っても巻き戻さない）。送信中もボタンは無効化せず、各クリックは独立した `POST` を並列に飛ばす。送信中は「送信中…」。429 は「混み合っています。少し待ってから押してください」、その他は「チェックインできませんでした。もう一度お試しください」。失敗時は count を変えない。API 不達時も骨格（タイトル・ボタン・フッター）は描画する |
+| UI | `src/ui/App.tsx`、縦 1 カラム。見出し「来場者チェックインカウンター」、人数（`data-testid="count"`、未取得は「—」）、全幅ボタン（`data-testid="checkin"`）、エラー（`data-testid="error"`）。メイン操作の下に使い方・FAQ。状態は `count` / `error` / `inFlight` の `useState` のみ。起動時 `GET /api/count`、以後 3 秒ポーリング。表示は受信済み count の最大値（KV の結果整合性で古い値が返っても巻き戻さない）。送信中もボタンは無効化せず、各クリックは独立した `POST` を並列に飛ばす。送信中は「送信中…」。429 は「混み合っています。少し待ってから押してください」、その他は「チェックインできませんでした。もう一度お試しください」。失敗時は count を変えない。API 不達時も骨格（タイトル・ボタン・フッター）は描画する |
 | API | `src/worker/index.ts`。すべて JSON（HTML は返さない）。`GET /api/health`（KV 書込→読出、200 `{"ok":true}`。契約を壊さない）、`GET /api/count`（200 `{"count":number}`）、`POST /api/checkin`（201 `{"count":number}`。429 / 400 / 413 では人数は増えない） |
 | 永続化 | `c.env.KV` のみ。TTL なしのキーを消すと人数が減る。`c:<crypto.randomUUID()>`（値は打刻 ISO 文字列）、`rl:<ip>`（`{"start":<epoch ms>,"n":<count>}`、`expirationTtl: 60`）。人数は `list({ prefix: "c:" })` を cursor で全ページ走査してキー数を合算。IP は `CF-Connecting-IP`、無ければ `"unknown"` |
 | 書込制限 | ボディ空または `{}` のみ。256 バイト超は 413、未知フィールド・不正 JSON は 400。同一 IP は初回から 5 秒間に 20 回まで成功、21 回目は 429。4999ms は同一窓、5000ms でリセット。`rl:<ip>` は単一キーの read-modify-write のため、並行 POST では上限判定がやや甘くなる（簡易レートリミットとして許容） |

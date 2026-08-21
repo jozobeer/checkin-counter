@@ -55,3 +55,40 @@
 .error {
   color: #f0a8a0;
 }
+
+.guide {
+  margin-top: 2.5rem;
+  text-align: left;
+  font-size: 0.85rem;
+  line-height: 1.65;
+  opacity: 0.85;
+}
+
+.guide h2 {
+  margin: 1.5rem 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.guide section:first-child h2 {
+  margin-top: 0;
+}
+
+.guide ol {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.guide dt {
+  margin-top: 0.75rem;
+  font-weight: 700;
+}
+
+.guide dt:first-child {
+  margin-top: 0;
+}
+
+.guide dd {
+  margin: 0.25rem 0 0;
+}

@@ -82,6 +82,27 @@ export function App() {
       <p className="error" data-testid="error">
         {error ?? ""}
       </p>
+      <div className="guide">
+        <section aria-labelledby="how-to-heading">
+          <h2 id="how-to-heading">使い方</h2>
+          <ol>
+            <li>「チェックイン」を押すと、会場の共有人数が 1 増えます。</li>
+            <li>ログインや氏名の入力はありません。</li>
+            <li>他の端末でも、同じ人数が数秒以内に見えます。</li>
+          </ol>
+        </section>
+        <section aria-labelledby="faq-heading">
+          <h2 id="faq-heading">FAQ</h2>
+          <dl>
+            <dt>人数は全員で共有されますか？</dt>
+            <dd>はい。どの端末で開いても同じ数字です。起動時と、そのあと 3 秒ごとにサーバから取り直します。</dd>
+            <dt>「混み合っています」と出たら？</dt>
+            <dd>同じ回線から短時間に押しすぎています。少し待ってからもう一度押してください。このときは人数は増えていません。</dd>
+            <dt>数字がすぐ変わらないことがありますか？</dt>
+            <dd>他の端末への反映が遅れることがあります。増えた分が消えることはありません。</dd>
+          </dl>
+        </section>
+      </div>
     </main>
   );
 }
